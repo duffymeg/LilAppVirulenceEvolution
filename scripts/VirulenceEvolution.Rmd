@@ -22,6 +22,8 @@ Meghan A. Duffy
 library(here)
 library(tidyverse)
 library(cowplot)
+library(lme4)
+library(ggtext)
 
 theme_set(theme_cowplot(font_size = 14))
 ```
@@ -30,34 +32,128 @@ theme_set(theme_cowplot(font_size = 14))
 # Tell R where files are stored
 here::i_am("scripts/VirulenceEvolution.Rmd")
 
-# Load the data
+# Load the data for analyzing virulence
 LA_infected <- readr::read_csv(here("data/LA_infected.csv")) 
+```
+
+```{r, field infection data}
+lilApp <- readr::read_csv(here("data/lilApp.csv")) 
+
+# do this to see which parasites are there (past, micg, spiro)
+ttt <- lilApp %>% 
+  select(Uninfected.Males:M.Past...Spider) %>%
+  gather("Parasite", "Count",Uninfected.Males:M.Past...Spider) %>%
+  group_by(Parasite) %>%
+  summarise(totinfe = sum(Count)) %>%
+  filter(totinfe > 0)
+
+past <- lilApp %>% # find columns with pasteuria in title
+  select(contains("past"))
+lilApp$pasteuria.inf <- rowSums(past)
+
+micg <- lilApp %>% 
+  select(contains("mic"))
+lilApp$micg.inf <- rowSums(micg)
+
+spiro <- lilApp %>% 
+  select(contains("spiro"))
+lilApp$spiro.inf <- rowSums(spiro)
+
+LilApp_allpara <- lilApp %>%
+  mutate(pasteuria.prev = pasteuria.inf/Total,
+         micg.prev = micg.inf/Total,
+         spiro.prev = spiro.inf/Total)
+
+# super contrived way of doing this 
+sample_vec <- c(rep(NA, 11))
+collect <- c(3, 5, 7)
+for (i in 1:length(collect)) {
+  x <- collect[i]
+  sample_vec[x] <- paste0("collected",i)
+}
+sample_vec[is.na(sample_vec)] <- "regular"
+LilApp_allpara$sampling <- sample_vec
+LilApp_allpara$sampling <- as.factor(LilApp_allpara$sampling)
+
+str(LilApp_allpara)
+summary(LilApp_allpara)
+
+LA_pastprev_plot <- ggplot() +
+  geom_line(data = LilApp_allpara, aes(x = Julian.Day, y = pasteuria.prev*100), size = 1.1, alpha = 0.7) +
+  geom_point(data = LilApp_allpara, aes(x = Julian.Day, y = pasteuria.prev*100, fill=sampling), size = 5, alpha = 1.0, shape = 21, show.legend = FALSE) +
+  ylim(0, 0.45*100) +
+  scale_x_continuous(breaks = c(213, 244, 274, 305), labels = c("Aug-1", "Sept-1","Oct-1", "Nov-1")) +
+  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483",'#7E7E7E')) +
+  xlab("") +
+  ylab("Prevalence \n(%)") 
+LA_pastprev_plot
+
+LA_density_plot <- ggplot() +
+  geom_line(data = LilApp_allpara, aes(x = Julian.Day, y = Density), size = 1.1, alpha = 0.7) +
+  geom_point(data = LilApp_allpara, aes(x = Julian.Day, y = Density, fill=sampling), size = 5, alpha = 1.0, shape = 21, show.legend = FALSE) +
+  scale_y_log10() +
+  scale_x_continuous(breaks = c(213, 244, 274, 305), labels = c("Aug-1", "Sept-1","Oct-1", "Nov-1")) +
+  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483",'#7E7E7E')) +
+  xlab("Date") +
+  ylab("*D. dentifera* density \n(per m^2)") +
+  theme(axis.title.y = ggtext::element_markdown())
+LA_density_plot
+
+fielddataplot <- plot_grid(LA_pastprev_plot, LA_density_plot, labels = "auto", ncol = 1, align = "v")
+fielddataplot
+
+ggsave(here("figures", "fielddataplot.jpg"), fielddataplot, units = "in", width = 5, height = 7, dpi = 300)
+```
+
+```{r, dealing with clone-parasite combinations with few reps}
+LA_infected_samplesizes <- LA_infected %>%
+  count(clone, para_time_point)
+
+# save
+write.csv(LA_infected_samplesizes, here("tables", "LA_infected_samplesizes.csv"), row.names = F)
+
+# remove clone-parasite treatments that had fewer than 3 individuals, based on the output of the table above
+LA_infected$remove <- ifelse(LA_infected$clone == '17' & LA_infected$para_time_point == "1" | 
+           LA_infected$clone == '31' |
+           LA_infected$clone == '224' |
+           LA_infected$clone == '241' |
+           LA_infected$clone == '312' & LA_infected$para_time_point == "none" |
+           LA_infected$clone == '312' & LA_infected$para_time_point == "1" |
+           LA_infected$clone == '329' & LA_infected$para_time_point == "1" |
+           LA_infected$clone == '335' |
+           LA_infected$clone == '337' & LA_infected$para_time_point == "1" |
+           LA_infected$clone == '343' & LA_infected$para_time_point == "1", 1, 0) 
+
+LA_infected_pruned <- LA_infected %>%
+  subset(remove == 0)
+
+# Get rid of time 4
+LA_infected_pruned <- subset(LA_infected_pruned, host_time_point != "4")
+
+LA_infected_pruned_samplesizes <- LA_infected_pruned %>%
+  filter(para_time_point != "none") %>%
+  count(clone, para_time_point)
 ```
 
 ```{r, basic data manipulation}
 # Calculating the proportion that never reproduced
-LA_infected <- LA_infected %>%
+LA_infected_pruned <- LA_infected_pruned %>%
   mutate(anyrepro = if_else(clutches == "0", "0", "1"))
 
-LA_infected$anyrepro <- as.numeric(LA_infected$anyrepro)
+LA_infected_pruned$anyrepro <- as.numeric(LA_infected_pruned$anyrepro)
 
 # Adding a column for log spores
-LA_infected$logspores <- log10(LA_infected$spores_tot)
-LA_infected$lnspores <- log(LA_infected$spores_tot)
+LA_infected_pruned$logspores <- log10(LA_infected_pruned$spores_tot)
+LA_infected_pruned$lnspores <- log(LA_infected_pruned$spores_tot)
 ```
 
 
-```{r, subsetting data to get rid of time 4}
-LA_infected <- subset(LA_infected, host_time_point != "4")
-
-```
-
-```{r, calculating mean and relative host lifespan}
-str(LA_infected)
-LA_infected$clone <- as.factor(as.character(LA_infected$clone))
+```{r, calculating mean host lifespan}
+str(LA_infected_pruned)
+LA_infected_pruned$clone <- as.factor(as.character(LA_infected_pruned$clone))
 
 # get mean lifespan for each clone*treatment
-stats_lifesp <- LA_infected %>%
+stats_lifesp <- LA_infected_pruned %>%
   group_by(host_time_point, para_time_point, clone) %>%
   summarise(mn_lifespan = mean(lifespan)) 
 
@@ -76,14 +172,6 @@ LA_control <- stats_lifesp %>% # select controls
 
 colnames(LA_control)[3] <- "control_lifespan"
 
-# calculate average lifespan for all controls together (grouped by time point)
-LA_control_avg <- LA_control %>%
-  group_by(host_time_point) %>%
-  summarise(mean_life = mean(control_lifespan))
-
-# turn into an unamed matrix so we can easily extract values later
-mean_mat <- unname(as.matrix(LA_control_avg))
-
 # rejoin infected and control dfs
 LA_rel_vir_lifespan <- full_join(LA_inf, LA_control)
 LA_rel_vir_lifespan$host_time_point <- as.factor(LA_rel_vir_lifespan$host_time_point)
@@ -92,31 +180,16 @@ LA_rel_vir_lifespan$host_time_point <- as.factor(LA_rel_vir_lifespan$host_time_p
 LA_rel_vir_lifespan_infvcontrol <- full_join(LA_inf, LA_control)
 LA_rel_vir_lifespan_infvcontrol$host_time_point <- as.factor(LA_rel_vir_lifespan_infvcontrol$host_time_point)
 
-# Replace NAs with the average control lifespan for that group
-# do this b/c didn't have controls for each clone
-LA_rel_vir_lifespan$control_lifespan[is.na(LA_rel_vir_lifespan$control_lifespan) & 
-                              LA_rel_vir_lifespan$host_time_point == "1"] <- mean_mat[1,2] # means
-LA_rel_vir_lifespan$control_lifespan[is.na(LA_rel_vir_lifespan$control_lifespan) & 
-                              LA_rel_vir_lifespan$host_time_point == "2"] <- mean_mat[2,2]
-LA_rel_vir_lifespan$control_lifespan[is.na(LA_rel_vir_lifespan$control_lifespan) & 
-                              LA_rel_vir_lifespan$host_time_point == "3"] <- mean_mat[3,2]
-
-# calculate relative virulence using mean and median control lifespans
-LA_rel_vir_lifespan$control_lifespan <- as.numeric(LA_rel_vir_lifespan$control_lifespan)
-
-LA_rel_vir_lifespan <- LA_rel_vir_lifespan %>%
-  mutate(rel_lifespan_mn = mn_lifespan/control_lifespan)
-
 LA_rel_vir_lifespan <- as.data.frame(LA_rel_vir_lifespan)
 
 str(LA_rel_vir_lifespan)
 ```
 
-```{r, calculating mean and relative fecundity}
-str(LA_infected)
+```{r, calculating mean fecundity}
+str(LA_infected_pruned)
 
 # get mean number clutches for each clone*treatment
-stats_clutches <- LA_infected %>%
+stats_clutches <- LA_infected_pruned %>%
   group_by(host_time_point, para_time_point, clone) %>%
   summarise(mn_clutches = mean(clutches)) 
 
@@ -135,14 +208,6 @@ LA_control <- stats_clutches %>% # select controls
 
 colnames(LA_control)[3] <- "control_clutches"
 
-# calculate average no. clutches for all controls together (grouped by time point)
-LA_control_avg <- LA_control %>%
-  group_by(host_time_point) %>%
-  summarise(mean_clutches = mean(control_clutches))
-
-# turn into an unamed matrix so we can easily extract values later
-mean_mat <- unname(as.matrix(LA_control_avg))
-
 # rejoin infected and control dfs
 LA_rel_vir_clutches <- full_join(LA_inf, LA_control)
 LA_rel_vir_clutches$host_time_point <- as.factor(LA_rel_vir_clutches$host_time_point)
@@ -151,20 +216,6 @@ LA_rel_vir_clutches$host_time_point <- as.factor(LA_rel_vir_clutches$host_time_p
 LA_rel_vir_clutches_infvcontrol <- full_join(LA_inf, LA_control)
 LA_rel_vir_clutches_infvcontrol$host_time_point <- as.factor(LA_rel_vir_clutches_infvcontrol$host_time_point)
 
-# Replace NAs with the average control number of clutches for that group
-# do this b/c didn't have controls for each clone
-LA_rel_vir_clutches$control_clutches[is.na(LA_rel_vir_clutches$control_clutches) & 
-                              LA_rel_vir_clutches$host_time_point == "1"] <- mean_mat[1,2] # means
-LA_rel_vir_clutches$control_clutches[is.na(LA_rel_vir_clutches$control_clutches) & 
-                              LA_rel_vir_clutches$host_time_point == "2"] <- mean_mat[2,2]
-LA_rel_vir_clutches$control_clutches[is.na(LA_rel_vir_clutches$control_clutches) & 
-                              LA_rel_vir_clutches$host_time_point == "3"] <- mean_mat[3,2]
-
-# calculate relative virulence using mean and median control clutches
-LA_rel_vir_clutches$control_clutches <- as.numeric(LA_rel_vir_clutches$control_clutches)
-
-LA_rel_vir_clutches <- LA_rel_vir_clutches %>%
-  mutate(rel_clutches_mn = mn_clutches/control_clutches)
 
 LA_rel_vir_clutches <- as.data.frame(LA_rel_vir_clutches)
 
@@ -176,10 +227,10 @@ str(LA_rel_vir_2)
 ```
 
 ```{r, calculating mean spore yield per clone}
-str(LA_infected)
+str(LA_infected_pruned)
 
 # get mean number clutches for each clone*treatment
-stats_spores <- LA_infected %>%
+stats_spores <- LA_infected_pruned %>%
   group_by(host_time_point, para_time_point, clone) %>%
   summarise(mn_spores = mean(spores_tot)) 
 
@@ -240,6 +291,9 @@ lifespaninfvcontrol <- ggplot(LA_rel_vir_lifespan_infvcontrol_long,
 lifespaninfvcontrol
 
 ```
+
+
+
 ```{r, analysis of host lifespan for inf v control}
 infvcontrollifespanmodel <- glm(lifespan ~ infvcontrol, 
              family = "quasipoisson", 
@@ -248,8 +302,16 @@ infvcontrollifespanmodel <- glm(lifespan ~ infvcontrol,
 plot(infvcontrollifespanmodel) 
 summary(infvcontrollifespanmodel)
 
+lifespansummary <- LA_rel_vir_lifespan_infvcontrol_long %>%
+  group_by(infvcontrol) %>%
+  summarise(mean = mean(lifespan))
+
+lifespansummary
+
 tapply(LA_rel_vir_lifespan_infvcontrol_long$lifespan, LA_rel_vir_lifespan_infvcontrol_long$infvcontrol, mean)
 ```
+
+
 ### Fecundity
 Expectation: infected ones should have many fewer clutches.
 ```{r, plotting fecundity data for infected v control comparison}
@@ -266,6 +328,12 @@ fecundityinfvcontrol
 
 ```{r, analysis of host repro for inf v control}
 LA_rel_vir_clutches_infvcontrol_long$log_clutches <- log((LA_rel_vir_clutches_infvcontrol_long$clutches+1))
+
+reprosummary <- LA_rel_vir_clutches_infvcontrol_long %>%
+  group_by(infvcontrol) %>%
+  summarise(mean = mean(clutches))
+
+reprosummary
 
 infvcontrolrepromodel <- glm(log_clutches ~ infvcontrol, 
              family = "gaussian", 
@@ -284,276 +352,157 @@ Let's arrange the lifespan & fecundity plots into a single figure:
 infvcontrolplot <- plot_grid(lifespaninfvcontrol, fecundityinfvcontrol, labels = "auto", ncol = 1, align = "v")
 infvcontrolplot
 
-ggsave(here("figures", "infvcontrolplot.pdf"), infvcontrolplot, units = "in", width = 5, height = 8, dpi = 300)
 ggsave(here("figures", "infvcontrolplot.jpg"), infvcontrolplot, units = "in", width = 5, height = 8, dpi = 300)
 
 ```
 
-## Same time comparison
-Let's first look at the lifespan of animals that were exposed to spores from the same time point
+## Analysis of infection prevalence in infection assays
+```{r, import dataset that will allow analysis of prevalence in infection assays}
+# The dataset we were working with above only has infected animals or controls. Let's upload the dataset that will also include animals that were exposed but did not become infected
+LA_full <- readr::read_csv(here("data/LA_full.csv")) 
 
-```{r, get dataset for just same time comparison}
-LA_means_sametime <- subset(LA_means, host_time_point == para_time_point)
-```
+# since we want to look at infectivity, let's get rid of the control/unexposed animals
+LA_exposed <- LA_full %>%
+  subset(para_time_point != "none")
 
-### Lifespan
-```{r, lifespan same time comparison}
-# plotting animals exposed to parasite from the same time point
-lifespansametime <- ggplot(LA_means_sametime, 
-                     aes(x=host_time_point, y=mn_lifespan, fill=para_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
-  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
-  xlab("Host time point") +ylab("Mean lifespan \n(days)") +
-  theme_cowplot()
+# get rid of time 4 hosts, since we didn't have parasites from that time point
+LA_exposed <- LA_exposed %>%
+  subset(host_time_point != '4')
 
-#colors from https://github.com/ciannabp/inauguration/blob/main/R/colors.R 
+# filter out ones that are missing spore counts
+LA_exposed <- LA_exposed %>%
+  drop_na(spores_tot)
 
-lifespansametime
+# Looking for clones that had very few animals in the experiment
+LA_exposed_samplesizes <- LA_exposed %>%
+  count(clone, para_time_point)
 
-```
+LA_exposed_samplesizes$remove <- ifelse(LA_exposed_samplesizes$n < 3, 'y', 'n')
 
+# save
+write.csv(LA_exposed_samplesizes, here("tables", "LA_exposed_samplesizes.csv"), row.names = F)
 
-```{r, analysis of host lifespan for same time comparison}
-mod1a <- glm(mn_lifespan ~ host_time_point, 
-             family = "quasipoisson", 
-             data = LA_means_sametime)
+# remove clone-parasite combinations that had fewer than 3 individuals   
+LA_exposed$remove <- ifelse(LA_exposed$clone == '31' |
+           LA_exposed$clone == '224' |
+           LA_exposed$clone == '312' & LA_exposed$para_time_point == '1' |
+           LA_exposed$clone == '329' & LA_exposed$para_time_point == '1' |
+           LA_exposed$clone == '335', 1, 0) 
 
-plot(mod1a) 
-summary(mod1a)
-```
-
-### Lifespan
-```{r, relative lifespan same time comparison}
-# plotting animals exposed to parasite from the same time point
-rellifespansametime <- ggplot(LA_means_sametime, 
-                     aes(x=host_time_point, y=rel_lifespan_mn, fill=para_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
-  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
-  # ggtitle("Lifespan When Exposed to Parasites from the \nSame Time Point") + 
-  xlab("Host time point") +ylab("Relative host lifespan") +
-  # labs(color= "Parasite time point") + labs(fill="Parasite time point") +
-  theme_cowplot()
-
-#colors from https://github.com/ciannabp/inauguration/blob/main/R/colors.R 
-
-rellifespansametime
-
-# ggsave(here("figures", "lifespansametime.pdf"), lifespansametime, units = "in", width = 7, height = 5, dpi = 300)
-```
+LA_exposed_pruned <- LA_exposed %>%
+  subset(remove == 0)
 
 
-```{r, analysis of relative host lifespan for same time comparison}
-mod1arel <- glm(rel_lifespan_mn ~ host_time_point, 
-             family = "quasipoisson", 
-             data = LA_means_sametime)
-
-plot(mod1arel) 
-summary(mod1arel)
-```
+# Using spore yield to determine if it was infected; this is more sensitive than the 'infection' column, which was based on a quick visual assessment at death -- that inspection missed some that had very low spore densities
+LA_exposed_pruned$infected <- ifelse(LA_exposed_pruned$spores_tot == 0, 0, 1)
 
 
-### Reproduction
-```{r, reproduction same time comparison}
-# plotting animals exposed to parasite from the same time point
-reprosametime <- ggplot(LA_means_sametime, 
-                     aes(x=host_time_point, y=mn_clutches, fill=para_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
-  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
-  # ggtitle("Lifespan When Exposed to Parasites from the \nSame Time Point") + 
-  xlab("Host time point") +ylab("Mean # clutches") +
-  # labs(color= "Parasite time point") + labs(fill="Parasite time point") +
-  theme_cowplot()
-
-reprosametime
-
-# ggsave(here("figures", "lifespansametime.pdf"), lifespansametime, units = "in", width = 7, height = 5, dpi = 300)
-```
-
-```{r, analysis of host reproduction for same time comparison}
-LA_means_sametime$log_mn_clutches <- log((LA_means_sametime$mn_clutches+1))
-
-mod1b <- glm(log_mn_clutches ~ host_time_point, 
-             family = "gaussian", 
-             data = LA_means_sametime)
-
-plot(mod1b) 
-summary(mod1b)
-```
-### Relative reproduction
-```{r, relative reproduction same time comparison}
-# plotting animals exposed to parasite from the same time point
-relreprosametime <- ggplot(LA_means_sametime, 
-                     aes(x=host_time_point, y=rel_clutches_mn, fill=para_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
-  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
-  xlab("Host time point") +ylab("Relative # clutches") +
-  # labs(color= "Parasite time point") + labs(fill="Parasite time point") +
-  theme_cowplot()
-
-relreprosametime
-
-# ggsave(here("figures", "lifespansametime.pdf"), lifespansametime, units = "in", width = 7, height = 5, dpi = 300)
-```
-
-```{r, analysis of relative host reproduction for same time comparison}
-LA_means_sametime$log_rel_clutches_mn <- log((LA_means_sametime$rel_clutches_mn+1))
-
-mod1brel <- glm(log_rel_clutches_mn ~ host_time_point, 
-             family = "gaussian", 
-             data = LA_means_sametime)
-
-plot(mod1brel) 
-summary(mod1brel)
-```
-
-### Spores
-```{r, spore yield same time comparison}
-# plotting animals exposed to parasite from the same time point
-sporessametime <- ggplot(LA_means_sametime, 
-                     aes(x=host_time_point, y=mn_spores, fill=para_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
-  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
-  # ggtitle("Lifespan When Exposed to Parasites from the \nSame Time Point") + 
-  xlab("Host time point") +ylab("Mean # spores \nper infected host") +
-  # labs(color= "Parasite time point") + labs(fill="Parasite time point") +
-  scale_y_log10() +
-  theme_cowplot()
-
-sporessametime
-
-# ggsave(here("figures", "lifespansametime.pdf"), lifespansametime, units = "in", width = 7, height = 5, dpi = 300)
-```
-
-
-```{r, analysis of spore yield for same time comparison}
-LA_means_sametime$log_mn_spores <- log(LA_means_sametime$mn_spores)
-
-mod1c <- glm(log_mn_spores ~ host_time_point, 
-             family = "gaussian", 
-             data = LA_means_sametime)
-
-plot(mod1c) 
-summary(mod1c)
-```
-
-### Parasite growth rate
-```{r, parasite growth rate for hosts from same time comparisons}
-LA_means_sametime$paragrowth <- (LA_means_sametime$mn_spores)/(LA_means_sametime$mn_lifespan)
-
-paragrowthsametime <- ggplot(LA_means_sametime, 
-                     aes(x=host_time_point, y=paragrowth, fill=para_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
-  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
-  xlab("Host time point") +ylab("Parasite growth rate \n(spores per day)") +
-  # labs(color= "Parasite time point") + labs(fill="Parasite time point") +
-  theme_cowplot()
-
-
-paragrowthsametime
-
-# ggsave(here("figures", "lifespansametime.pdf"), lifespansametime, units = "in", width = 7, height = 5, dpi = 300)
-```
-
-```{r, analysis of parasite growth rate for same time comparison}
-mod1d <- glm(paragrowth ~ host_time_point, 
-             family = "gaussian", 
-             data = LA_means_sametime)
-
-plot(mod1d) 
-summary(mod1d)
-```
-### Combined figure 
-```{r, figure with plots from same time comparisons}
-sametimeplot <- plot_grid(lifespansametime, rellifespansametime, reprosametime, relreprosametime, sporessametime, paragrowthsametime, labels = "auto", ncol = 2, align = "v")
-sametimeplot
-
-ggsave(here("figures", "sametimeplot.pdf"), sametimeplot, units = "in", width = 12, height = 7, dpi = 300)
-ggsave(here("figures", "sametimeplot.jpg"), sametimeplot, units = "in", width = 12, height = 7, dpi = 300)
-```
-
-
-### Comparing lifespan vs. spore yield
-```{r, spore yield v lifespan plot}
-lifespansporeyieldplot <- ggplot(LA_means_sametime, 
-                     aes(x=mn_lifespan, y=mn_spores, fill=para_time_point)) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.1, height=0), alpha = 0.8, aes(colour=para_time_point)) +
-  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
-  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
-  #ggtitle("Spore Yield When Exposed to Parasites from the \nSame Time Point") + 
-  xlab("Mean lifespan (days)") +ylab("Mean spore yield \n(spores per host)") +
-  labs(color= "Parasite Time Point") + labs(fill="Parasite Time Point") +
-  scale_y_log10() +
-  geom_smooth(method='lm') +
-  theme_cowplot()
-
-lifespansporeyieldplot
-
-ggsave(here("figures", "lifespansporeyieldplot.pdf"), lifespansporeyieldplot, units = "in", width = 6, height = 3, dpi = 300)
-ggsave(here("figures", "lifespansporeyieldplot.jpg"), lifespansporeyieldplot, units = "in", width = 6, height = 3, dpi = 300)
-
-```
-
-### Considering tolerance
-```{r, tolerance plot}
-toleranceplotA <- ggplot(LA_means_sametime, 
-                     aes(x=mn_spores, y=mn_lifespan, fill=para_time_point)) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.1, height=0), alpha = 0.8, aes(colour=para_time_point)) +
-  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
-  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
-  #ggtitle("Spore Yield When Exposed to Parasites from the \nSame Time Point") + 
-  xlab("Spore yield") +ylab("Lifespan") +
-  labs(color= "Parasite Time Point") + labs(fill="Parasite Time Point") +
-  scale_x_log10() +
-  geom_smooth(method='lm') +
-  theme_cowplot()
-
-#toleranceplotA
-
-
-toleranceplotB <- ggplot(LA_means_sametime, 
-                     aes(x=mn_spores, y=mn_clutches, fill=para_time_point)) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.1, height=0), alpha = 0.8, aes(colour=para_time_point)) +
-  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
-  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
-  #ggtitle("Spore Yield When Exposed to Parasites from the \nSame Time Point") + 
-  xlab("Spore yield") +ylab("Clutches") +
-  labs(color= "Parasite Time Point") + labs(fill="Parasite Time Point") +
-  scale_x_log10() +
-  geom_smooth(method='lm') +
-  theme_cowplot()
-
-#toleranceplotB
-
-toleranceplot <- plot_grid(toleranceplotA, toleranceplotB, labels = "auto", ncol = 1, align = "v")
-toleranceplot
-
-```
-
-
-```{r, looking at tolerance at time 3}
-LA_means_sametime_time3 <- subset(LA_means_sametime, para_time_point == '3')
-LA_means_sametime_time3$log_spores <- log(LA_means_sametime_time3$mn_spores)
-
-cor.test(LA_means_sametime_time3$log_spores, LA_means_sametime_time3$mn_clutches, method="pearson")
-
-cor.test(LA_means_sametime_time3$log_spores, LA_means_sametime_time3$mn_lifespan, method="pearson")
+# Calculate number infected and total sample sizes
+LA_exposed_prevalence <- LA_exposed_pruned %>%
+  group_by(clone, host_time_point, para_time_point) %>%
+  summarise(total = n(), inf = sum(infected)) 
   
+# Calculate proportion infected per clone
+LA_exposed_prevalence$propinf <- LA_exposed_prevalence$inf/LA_exposed_prevalence$total
+
+LA_exposed_prevalence$host_time_point <- as.character(LA_exposed_prevalence$host_time_point)
+
+infprevplot <- ggplot(LA_exposed_prevalence, 
+                     aes(x=host_time_point, y=propinf, fill=para_time_point)) + 
+  geom_violin(position=position_dodge(1)) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
+  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
+  xlab("Host time point") +ylab("Proportion infected") +
+  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
+  theme_cowplot()
+
+infprevplot
+
+infprevplota <- LA_exposed_prevalence %>%
+  filter(host_time_point == para_time_point) %>%
+  ggplot(aes(x=host_time_point, y=propinf, fill=para_time_point)) + 
+  geom_violin(position=position_dodge(1), show.legend = FALSE) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
+  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
+  ylim(0,1.00) +
+  xlab("Host time point") +ylab("Proportion infected") +
+  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
+  theme_cowplot()
+
+infprevplota
+
+infprevplotb <- LA_exposed_prevalence %>%
+  filter(host_time_point == 3) %>%
+  ggplot(aes(x=para_time_point, y=propinf, fill=para_time_point)) + 
+  geom_violin(position=position_dodge(1), show.legend = FALSE) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#C0C0C0", "#f3c483")) + 
+  scale_color_manual(values=c("#C0C0C0", "#f3c483")) +
+  ylim(0,1.00) +
+  xlab("Parasite time point") +ylab("Proportion infected") +
+  theme_cowplot()
+
+infprevplotb
+
+infprevplot2 <- plot_grid(infprevplota, infprevplotb, labels = "auto", ncol = 2, align = "v")
+infprevplot2
+
+ggsave(here("figures", "infprevplot.jpg"), infprevplot2, units = "in", width = 8, height = 5, dpi = 300)
 ```
+
+```{r, analyze infection prevalence data}
+LA_exposed_prevalence_sametime <- subset(LA_exposed_prevalence, host_time_point == para_time_point)
+
+# Version without clone
+prevmodel1<-glm(cbind(inf, total-inf) ~ para_time_point, family='binomial', data=LA_exposed_prevalence_sametime) 
+summary(prevmodel1)
+
+# Testing for overdispersion (using code from Ben Bolker via Michelle Fearon)
+overdisp_fun <- function(model) {
+  rdf <- df.residual(model)
+  rp <- residuals(model,type="pearson")
+  Pearson.chisq <- sum(rp^2)
+  prat <- Pearson.chisq/rdf
+  pval <- pchisq(Pearson.chisq, df=rdf, lower.tail=FALSE)
+  c(chisq=Pearson.chisq,ratio=prat,rdf=rdf,p=pval)
+}
+
+overdisp_fun(prevmodel1)
+
+# that shows overdispersion (p < 0.05)
+# Adding in clone to try to deal with overdispersion
+prevmodel1b<-glmer(cbind(inf, total-inf) ~ para_time_point + (1 | clone), family='binomial', data=LA_exposed_prevalence_sametime) 
+
+overdisp_fun(prevmodel1b)
+summary(prevmodel1b)
+
+LA_exposed_prevalence_sametime$para_time_point <- as.factor(LA_exposed_prevalence_sametime$para_time_point)
+
+# Testing for overall effect of parasite time point
+drop1(prevmodel1b,test="Chisq")
+
+# Now comparing the two sets of spores that were used to infect time 3 hosts
+LA_exposed_prevalence_time3 <- subset(LA_exposed_prevalence, host_time_point == '3')
+
+prevmodel2<-glm(cbind(inf, total-inf) ~ para_time_point, family='binomial', data=LA_exposed_prevalence_time3)
+
+overdisp_fun(prevmodel2)
+
+prevmodel2b<-glmer(cbind(inf, total-inf) ~ para_time_point + (1 | clone), family='binomial', data=LA_exposed_prevalence_time3) 
+
+overdisp_fun(prevmodel2b)
+
+summary(prevmodel2b)
+
+# Getting chi-square to be parallel to initial analysis
+drop1(prevmodel2b,test="Chisq")
+```
+
 
 ## Parasite evolution comparison
-Comparing hosts from time 1 and hosts from time 3 that were exposed to parasites from time 3
+Comparing hosts from time 3 that were exposed to parasites from time 1 vs. time 3
 
 ```{r, get dataset for just hosts from time 3}
 LA_means_paraevol <- subset(LA_means, host_time_point == 3)
@@ -565,8 +514,8 @@ lifespanparaevol <- ggplot(LA_means_paraevol,
                      aes(x=para_time_point, y=mn_lifespan, fill=para_time_point)) + 
   geom_violin(show.legend = FALSE) + 
   geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#C0C0C0", "#f3c483")) + 
-  scale_color_manual(values=c("#C0C0C0", "#f3c483")) +
+  scale_fill_manual(values=c("#5445b1", "#f3c483")) + 
+  scale_color_manual(values=c("#5445b1", "#f3c483")) +
   xlab("Parasite time point") +ylab("Mean lifespan \n(days)") +
   labs(color= "Parasite time point") + labs(fill="Parasite time point") +
   theme_cowplot()
@@ -574,7 +523,6 @@ lifespanparaevol <- ggplot(LA_means_paraevol,
 
 lifespanparaevol
 
-# ggsave(here("figures", "lifespansametime.pdf"), lifespansametime, units = "in", width = 7, height = 5, dpi = 300)
 ```
 
 ```{r, analysis of host lifespan for parasite evolution comparison}
@@ -585,31 +533,6 @@ mod2a <- glm(mn_lifespan ~ para_time_point,
 plot(mod2a) 
 summary(mod2a)
 ```
-### Relative lifespan
-```{r, relative lifespan for hosts from time 3}
-rellifespanparaevol <- ggplot(LA_means_paraevol, 
-                     aes(x=para_time_point, y=rel_lifespan_mn, fill=para_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#C0C0C0", "#f3c483")) + 
-  scale_color_manual(values=c("#C0C0C0", "#f3c483")) +
-  xlab("Parasite time point") +ylab("Relative host lifespan") +
-  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
-  theme_cowplot()
-
-
-rellifespanparaevol
-```
-
-```{r, analysis of relative host lifespan for parasite evolution comparison}
-mod2arel <- glm(rel_lifespan_mn ~ para_time_point, 
-             family = "quasipoisson", 
-             data = LA_means_paraevol)
-
-plot(mod2arel) 
-summary(mod2arel)
-```
-
 
 
 ### Reproduction
@@ -618,8 +541,8 @@ reproparaevol <- ggplot(LA_means_paraevol,
                      aes(x=para_time_point, y=mn_clutches, fill=para_time_point)) + 
   geom_violin(show.legend = FALSE) + 
   geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#C0C0C0", "#f3c483")) + 
-  scale_color_manual(values=c("#C0C0C0", "#f3c483")) +
+  scale_fill_manual(values=c("#5445b1", "#f3c483")) + 
+  scale_color_manual(values=c("#5445b1", "#f3c483")) +
   xlab("Parasite time point") +ylab("Mean # clutches") +
   labs(color= "Parasite time point") + labs(fill="Parasite time point") +
   theme_cowplot()
@@ -633,38 +556,11 @@ reproparaevol
 LA_means_paraevol$log_mn_clutches <- log((LA_means_paraevol$mn_clutches+1))
 
 mod2b <- glm(log_mn_clutches ~ para_time_point, 
-             family = "gaussian", 
+             family = "quasipoisson", 
              data = LA_means_paraevol)
 
 plot(mod2b) 
 summary(mod2b)
-```
-
-### Relative reproduction
-```{r, relative reproduction same parasite evolution comparison}
-relreproparaevol <- ggplot(LA_means_paraevol, 
-                     aes(x=para_time_point, y=rel_clutches_mn, fill=para_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#C0C0C0", "#f3c483")) + 
-  scale_color_manual(values=c("#C0C0C0", "#f3c483")) +
-  xlab("Parasite time point") +ylab("Relative # clutches") +
-  # labs(color= "Parasite time point") + labs(fill="Parasite time point") +
-  theme_cowplot()
-
-relreproparaevol
-
-```
-
-```{r, analysis of relative host reproduction for parasite evolution comparison}
-LA_means_paraevol$log_rel_clutches_mn <- log((LA_means_paraevol$rel_clutches_mn+1))
-
-mod2brel <- glm(log_rel_clutches_mn ~ para_time_point, 
-             family = "gaussian", 
-             data = LA_means_paraevol)
-
-plot(mod2brel) 
-summary(mod2brel)
 ```
 
 
@@ -674,8 +570,8 @@ sporesparaevol <- ggplot(LA_means_paraevol,
                      aes(x=para_time_point, y=mn_spores, fill=para_time_point)) + 
   geom_violin(show.legend = FALSE) + 
   geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#C0C0C0", "#f3c483")) + 
-  scale_color_manual(values=c("#C0C0C0", "#f3c483")) +
+  scale_fill_manual(values=c("#5445b1", "#f3c483")) + 
+  scale_color_manual(values=c("#5445b1", "#f3c483")) +
   xlab("Parasite time point") +ylab("Mean # spores \nper infected host") +
   labs(color= "Parasite time point") + labs(fill="Parasite time point") +
   scale_y_log10() +
@@ -705,8 +601,8 @@ paragrowthparaevol <- ggplot(LA_means_paraevol,
                      aes(x=para_time_point, y=paragrowth, fill=para_time_point)) + 
   geom_violin(show.legend = FALSE) + 
   geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#C0C0C0", "#f3c483")) + 
-  scale_color_manual(values=c("#C0C0C0", "#f3c483")) +
+  scale_fill_manual(values=c("#5445b1", "#f3c483")) + 
+  scale_color_manual(values=c("#5445b1", "#f3c483")) +
   xlab("Parasite time point") +ylab("Parasite growth rate \n(spores per day)") +
   labs(color= "Parasite time point") + labs(fill="Parasite time point") +
   theme_cowplot()
@@ -727,200 +623,63 @@ summary(mod2d)
 
 ### Combined figure 
 ```{r, figure with plots for parasite evolution comparisons}
-paraevolplot <- plot_grid(lifespanparaevol, rellifespanparaevol, reproparaevol, relreproparaevol, sporesparaevol, paragrowthparaevol, labels = "auto", ncol = 2, align = "v")
+paraevolplot <- plot_grid(lifespanparaevol, reproparaevol, sporesparaevol, paragrowthparaevol, labels = "auto", ncol = 2, align = "v")
 paraevolplot
 
-ggsave(here("figures", "paraevolplot.pdf"), paraevolplot, units = "in", width = 10, height = 7, dpi = 300)
 ggsave(here("figures", "paraevolplot.jpg"), paraevolplot, units = "in", width = 10, height = 7, dpi = 300)
 ```
 
-
-## Host evolution comparison
-Comparing hosts from time 1 and hosts from time 3 that were exposed to parasites from time 3
-
-```{r, get dataset for just parasites from time 1}
-LA_means_hostevol <- subset(LA_means, para_time_point == 1)
-```
-
-### Lifespan
-```{r, lifespan for parasites from time 1}
-lifespanhostevol <- ggplot(LA_means_hostevol, 
-                     aes(x=host_time_point, y=mn_lifespan, fill=host_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#5445b1", "#808080")) + 
-  scale_color_manual(values=c("#5445b1", "#808080")) +
-  xlab("Host time point") +ylab("Mean lifespan \n(days)") +
-  labs(color= "Host time point") + labs(fill="Host time point") +
+```{r, plots of parasite growth rate}
+clutchessporesplot <- ggplot(LA_means_paraevol, aes(x = mn_clutches, y = mn_spores)) +
+  geom_jitter(shape = 16, position=position_jitter(width=0.3, height=0.3), alpha = 0.8, aes(color=para_time_point)) +
+  geom_smooth(method='lm') +
   theme_cowplot()
 
+clutchessporesplot 
 
-lifespanhostevol
-
-# ggsave(here("figures", "lifespansametime.pdf"), lifespansametime, units = "in", width = 7, height = 5, dpi = 300)
-```
-
-```{r, analysis of host lifespan for host evolution comparison}
-mod3a <- glm(mn_lifespan ~ host_time_point, 
-             family = "quasipoisson", 
-             data = LA_means_hostevol)
-
-plot(mod3a) 
-summary(mod3a)
-```
-
-### Relative lifespan
-```{r, relative lifespan for parasites from time 1}
-rellifespanhostevol <- ggplot(LA_means_hostevol, 
-                     aes(x=host_time_point, y=rel_lifespan_mn, fill=host_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#5445b1", "#808080")) + 
-  scale_color_manual(values=c("#5445b1", "#808080")) +
-  xlab("Host time point") +ylab("Relative host lifespan") +
-  labs(color= "Host time point") + labs(fill="Host time point") +
+lifespansporesplot <- ggplot(LA_means_paraevol, aes(x = mn_lifespan, y = mn_spores)) +
+  geom_jitter(shape = 16, position=position_jitter(width=0.3, height=0.3), alpha = 0.8, aes(color=para_time_point)) +
+  geom_smooth(method='lm') +
   theme_cowplot()
 
+lifespansporesplot 
 
-rellifespanhostevol
-```
-
-```{r, analysis of host relative lifespan for host evolution comparison}
-mod3arel <- glm(rel_lifespan_mn ~ host_time_point, 
-             family = "quasipoisson", 
-             data = LA_means_hostevol)
-
-plot(mod3arel) 
-summary(mod3arel)
-```
-
-
-### Reproduction
-```{r, plot of reproduction for parasites from time 1}
-reprohostevol <- ggplot(LA_means_hostevol, 
-                     aes(x=host_time_point, y=mn_clutches, fill=host_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#5445b1", "#808080")) + 
-  scale_color_manual(values=c("#5445b1", "#808080")) +
-  xlab("Host time point") +ylab("Mean # clutches") +
-  labs(color= "Host time point") + labs(fill="Host time point") +
+clutchessporegrowthplot <- ggplot(LA_means_paraevol, aes(x = mn_clutches, y = paragrowth)) +
+  geom_jitter(shape = 16, position=position_jitter(width=0.3, height=0.3), alpha = 0.8, aes(color=para_time_point)) +
+  geom_smooth(method='lm') +
   theme_cowplot()
 
+clutchessporegrowthplot 
 
-reprohostevol
-```
-
-```{r, analysis of host reproduction for host evolution comparison}
-LA_means_hostevol$log_mn_clutches <- log((LA_means_hostevol$mn_clutches+1))
-
-mod3b <- glm(log_mn_clutches ~ host_time_point, 
-             family = "gaussian", 
-             data = LA_means_hostevol)
-
-plot(mod3b) 
-summary(mod3b)
-```
-### Relative reproduction
-```{r, relative reproduction for parasites from time 1}
-relreprohostevol <- ggplot(LA_means_hostevol, 
-                     aes(x=host_time_point, y=rel_clutches_mn, fill=host_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#5445b1", "#808080")) + 
-  scale_color_manual(values=c("#5445b1", "#808080")) +
-  xlab("Host time point") +ylab("Relative # clutches") +
-  labs(color= "Host time point") + labs(fill="Host time point") +
+lifespansporegrowthplot <- ggplot(LA_means_paraevol, aes(x = mn_lifespan, y = paragrowth)) +
+  geom_jitter(shape = 16, position=position_jitter(width=0.3, height=0.3), alpha = 0.8, aes(color=para_time_point)) +
+  geom_smooth(method='lm') +
   theme_cowplot()
 
+lifespansporegrowthplot 
 
-relreprohostevol
-```
 
-```{r, analysis of relative reproduction for host evolution comparison}
-LA_means_hostevol$log_rel_clutches_mn <- log((LA_means_hostevol$rel_clutches_mn+1))
+time3sporeplot <- plot_grid(clutchessporesplot, lifespansporesplot, clutchessporegrowthplot, lifespansporegrowthplot, labels = "auto", ncol = 2, align = "v")
+time3sporeplot
 
-mod3brel <- glm(log_rel_clutches_mn ~ host_time_point, 
-             family = "gaussian", 
-             data = LA_means_hostevol)
-
-plot(mod3brel) 
-summary(mod3brel)
+ggsave(here("figures", "time3sporeplot.jpg"), time3sporeplot, units = "in", width = 10, height = 7, dpi = 300)
 ```
 
 
-### Spores
-```{r, spore yield for parasites from time 1}
-sporeshostevol <- ggplot(LA_means_hostevol, 
-                     aes(x=host_time_point, y=mn_spores, fill=host_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#5445b1", "#808080")) + 
-  scale_color_manual(values=c("#5445b1", "#808080")) +
-  xlab("Host time point") +ylab("Mean # spores \nper infected host") +
-  labs(color= "Host time point") + labs(fill="Host time point") +
-  scale_y_log10() +
-  theme_cowplot()
+```{r, correlations with parasite growth rate}
+cor.test(LA_means_paraevol$log_mn_clutches, LA_means_paraevol$log_mn_spores)
 
+cor.test(LA_means_paraevol$log_mn_clutches, LA_means_paraevol$mn_lifespan)
 
-sporeshostevol
+cor.test(LA_means_paraevol$mn_lifespan, LA_means_paraevol$log_mn_spores)
+
+cor.test(LA_means_paraevol$log_mn_clutches, LA_means_paraevol$mn_spores)
+
+cor.test(LA_means_paraevol$mn_lifespan, LA_means_paraevol$log_mn_spores)
+
+cor.test(LA_means_paraevol$log_mn_clutches, LA_means_paraevol$paragrowth)
+
+cor.test(LA_means_paraevol$mn_lifespan, LA_means_paraevol$paragrowth)
+
 ```
-
-```{r, analysis of spore yield for host evolution comparison}
-LA_means_hostevol$log_mn_spores <- log(LA_means_hostevol$mn_spores)
-
-mod3c <- glm(log_mn_spores ~ host_time_point, 
-             family = "gaussian", 
-             data = LA_means_hostevol)
-
-plot(mod3c) 
-summary(mod3c)
-```
-
-### Parasite growth rate
-```{r, parasite growth rate for parasites from time 1}
-LA_means_hostevol$paragrowth <- (LA_means_hostevol$mn_spores)/(LA_means_hostevol$mn_lifespan)
-
-paragrowthhostevol <- ggplot(LA_means_hostevol, 
-                     aes(x=host_time_point, y=paragrowth, fill=host_time_point)) + 
-  geom_violin(show.legend = FALSE) + 
-  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
-  scale_fill_manual(values=c("#5445b1", "#808080")) + 
-  scale_color_manual(values=c("#5445b1", "#808080")) +
-  xlab("Host time point") +ylab("Parasite growth rate \n(spores per day)") +
-  labs(color= "Host time point") + labs(fill="Host time point") +
-  theme_cowplot()
-
-
-paragrowthhostevol
-```
-
-```{r, analysis of parasite growth rate for host evolution comparison}
-mod3d <- glm(paragrowth ~ host_time_point, 
-             family = "gaussian", 
-             data = LA_means_hostevol)
-
-plot(mod3d) 
-summary(mod3d)
-```
-
-
-### Combined figure 
-```{r, figure with plots from host evolution comparison}
-hostevolplot <- plot_grid(lifespanhostevol, rellifespanhostevol, reprohostevol, relreprohostevol, sporeshostevol, paragrowthhostevol, labels = "auto", ncol = 2, align = "v")
-hostevolplot
-
-ggsave(here("figures", "hostevolplot.pdf"), hostevolplot, units = "in", width = 10, height = 7, dpi = 300)
-ggsave(here("figures", "hostevolplot.jpg"), hostevolplot, units = "in", width = 10, height = 7, dpi = 300)
-```
-
-
-
-
-
-
-
-
-
-
 
