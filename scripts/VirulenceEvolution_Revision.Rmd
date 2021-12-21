@@ -1,0 +1,815 @@
+---
+title: "Virulence Evolution in Little Appleton"
+author: "Meghan Duffy"
+date: "4/2/2021"
+output: html_document
+---
+
+Data and code for paper on evolution during a 2017 epidemic of Pasteuria ramosa in Little Appleton Lake.
+Authors:
+Camden D. Gowler
+Haley Essington
+Patrick A. Clay
+Bruce O'Brien
+Clara L. Shaw
+Rebecca Bilich
+Meghan A. Duffy
+
+# Analysis of data collected on Little Appleton's 2017 Pasteuria epidemic
+
+```{r, load libraries, include=FALSE}
+# Load the libraries & set theme for figure export
+library(here)
+library(tidyverse)
+library(cowplot)
+library(lme4)
+library(ggtext)
+library(emmeans)
+
+theme_set(theme_cowplot(font_size = 14))
+```
+
+```{r, load dataload, include = FALSE}
+# Tell R where files are stored
+here::i_am("scripts/VirulenceEvolution.Rmd")
+
+```
+
+## Field data on infection prevalence and host density
+
+```{r, field infection data}
+lilApp <- readr::read_csv(here("data/lilApp.csv")) 
+
+# do this to see which parasites are there (past, micg, spiro)
+ttt <- lilApp %>% 
+  select(Uninfected.Males:M.Past...Spider) %>%
+  gather("Parasite", "Count",Uninfected.Males:M.Past...Spider) %>%
+  group_by(Parasite) %>%
+  summarise(totinfe = sum(Count)) %>%
+  filter(totinfe > 0)
+
+past <- lilApp %>% # find columns with pasteuria in title
+  select(contains("past"))
+lilApp$pasteuria.inf <- rowSums(past)
+
+micg <- lilApp %>% 
+  select(contains("mic"))
+lilApp$micg.inf <- rowSums(micg)
+
+spiro <- lilApp %>% 
+  select(contains("spiro"))
+lilApp$spiro.inf <- rowSums(spiro)
+
+LilApp_allpara <- lilApp %>%
+  mutate(pasteuria.prev = pasteuria.inf/Total,
+         micg.prev = micg.inf/Total,
+         spiro.prev = spiro.inf/Total)
+
+# super contrived way of doing this 
+sample_vec <- c(rep(NA, 11))
+collect <- c(3, 5, 7)
+for (i in 1:length(collect)) {
+  x <- collect[i]
+  sample_vec[x] <- paste0("collected",i)
+}
+sample_vec[is.na(sample_vec)] <- "regular"
+LilApp_allpara$sampling <- sample_vec
+LilApp_allpara$sampling <- as.factor(LilApp_allpara$sampling)
+
+str(LilApp_allpara)
+summary(LilApp_allpara)
+
+LA_pastprev_plot <- ggplot() +
+  geom_line(data = LilApp_allpara, aes(x = Julian.Day, y = pasteuria.prev*100), size = 1.1, alpha = 0.7) +
+  geom_point(data = LilApp_allpara, aes(x = Julian.Day, y = pasteuria.prev*100, fill=sampling), size = 5, alpha = 1.0, shape = 21, show.legend = FALSE) +
+  ylim(0, 0.45*100) +
+  scale_x_continuous(breaks = c(213, 244, 274, 305), labels = c("Aug-1", "Sept-1","Oct-1", "Nov-1")) +
+  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483",'#7E7E7E')) +
+  xlab("") +
+  ylab("Prevalence \n(%)") 
+LA_pastprev_plot
+
+LA_density_plot <- ggplot() +
+  geom_line(data = LilApp_allpara, aes(x = Julian.Day, y = Density), size = 1.1, alpha = 0.7) +
+  geom_point(data = LilApp_allpara, aes(x = Julian.Day, y = Density, fill=sampling), size = 5, alpha = 1.0, shape = 21, show.legend = FALSE) +
+  scale_y_log10() +
+  scale_x_continuous(breaks = c(213, 244, 274, 305), labels = c("Aug-1", "Sept-1","Oct-1", "Nov-1")) +
+  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483",'#7E7E7E')) +
+  xlab("Date") +
+  ylab("*D. dentifera* density \n(per m^2)") +
+  theme(axis.title.y = ggtext::element_markdown())
+LA_density_plot
+
+fielddataplot <- plot_grid(LA_pastprev_plot, LA_density_plot, labels = "auto", ncol = 1, align = "v")
+fielddataplot
+
+ggsave(here("figures", "fielddataplot.jpg"), fielddataplot, units = "in", width = 5, height = 7, dpi = 300)
+```
+## Infection Assay Data
+
+### Checking out sample sizes
+```{r, initial manipulations of infection assay data}
+# Load the data for analyzing virulence
+LA_infected <- readr::read_csv(here("data/LA_infected.csv")) 
+
+# Get rid of time 4 (which had only one host clone)
+LA_infected <- subset(LA_infected, host_time_point != "4")
+
+# Calculating the proportion that never reproduced
+LA_infected <- LA_infected %>%
+  mutate(anyrepro = if_else(clutches == "0", "0", "1"))
+
+LA_infected$anyrepro <- as.numeric(LA_infected$anyrepro)
+
+# Adding a column for log spores
+LA_infected$logspores <- log10(LA_infected$spores_tot)
+LA_infected$lnspores <- log(LA_infected$spores_tot)
+
+
+```
+
+```{r, figuring out number of reps for different clone-parasite combinations}
+LA_infected_samplesizes <- LA_infected %>%
+  count(clone, para_time_point)
+
+# save
+write.csv(LA_infected_samplesizes, here("tables", "LA_infected_samplesizes.csv"), row.names = F)
+
+```
+
+## Infected vs. uninfected comparison
+
+```{r, first getting data in shape for plotting and analysis}
+LA_infected$clone <- as.factor(as.character(LA_infected$clone))
+LA_infected$host_time_point <- as.factor(as.character(LA_infected$host_time_point))
+LA_infected$para_time_point <- as.factor(as.character(LA_infected$para_time_point))
+
+LA_infected$exposed <- ifelse(LA_infected$para_time_point == "none", 'unexposed', 'infected')
+
+# Note: all of the animals in this dataset are either controls or infected, so don't need to worry about exposed but uninfected animals
+
+LA_infected_summary <- LA_infected %>%
+  group_by(exposed, host_time_point, clone, para_time_point) %>%
+  summarise(meanlifespan = mean(lifespan), meanclutches = mean(clutches)) 
+
+```
+
+
+
+```{r, plotting lifespan data for infvcontrol}
+lifespaninfvcontrol <- ggplot(LA_infected_summary, 
+                               aes(x=exposed, y=meanlifespan)) + 
+  geom_violin() + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, color = '#5c1a33', size = 2) + 
+  ylab("Mean lifespan \n(days)")  +
+  theme_cowplot() +
+  theme(axis.title.x = element_blank())
+
+
+lifespaninfvcontrol
+
+```
+
+
+```{r, plotting fecundity data for infected v control comparison}
+
+
+# making a plot comparing exposed vs. unexposed
+fecundityinfvcontrol <- ggplot(LA_infected_summary, 
+                               aes(x=exposed, y=meanclutches)) + 
+  geom_violin() + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, color = '#5c1a33', size = 2) +
+  ylab("Mean # clutches")  +
+  theme_cowplot() +
+  theme(axis.title.x = element_blank())
+
+fecundityinfvcontrol
+```
+
+
+Let's arrange the lifespan & fecundity plots into a single figure:
+```{r, single plot of inf v unexposed}
+infvcontrolplot <- plot_grid(lifespaninfvcontrol, fecundityinfvcontrol, labels = "auto", ncol = 1, align = "v")
+infvcontrolplot
+
+ggsave(here("figures", "infvcontrolplot.jpg"), infvcontrolplot, units = "in", width = 5, height = 8, dpi = 300)
+
+```
+
+
+```{r, analysis of host lifespan and reproduction for inf v control using unpruned data}
+
+infvcontrollifespanmodel<-glmer(lifespan ~ exposed + (1 | clone), family = "poisson", data=LA_infected) 
+
+summary(infvcontrollifespanmodel)
+
+# Testing for overdispersion (using code from Ben Bolker via Michelle Fearon)
+overdisp_fun <- function(model) {
+  rdf <- df.residual(model)
+  rp <- residuals(model,type="pearson")
+  Pearson.chisq <- sum(rp^2)
+  prat <- Pearson.chisq/rdf
+  pval <- pchisq(Pearson.chisq, df=rdf, lower.tail=FALSE)
+  c(chisq=Pearson.chisq,ratio=prat,rdf=rdf,p=pval)
+}
+
+overdisp_fun(infvcontrollifespanmodel)
+
+#very overdispersed, so let's go to a negative binomial distribution
+infvcontrollifespanmodel.nb <-glmer.nb(lifespan ~ exposed + (1 | clone), data=LA_infected) 
+
+overdisp_fun(infvcontrollifespanmodel.nb)
+
+summary(infvcontrollifespanmodel.nb)
+
+
+infvcontrolrepro<-glmer(clutches ~ exposed + (1 | clone), family = "poisson", data=LA_infected) 
+
+overdisp_fun(infvcontrolrepro)
+
+infvcontrolrepro.nb <-glmer.nb(clutches ~ exposed + (1 | clone), data=LA_infected) 
+
+overdisp_fun(infvcontrolrepro.nb)
+
+summary(infvcontrolrepro.nb)
+
+```
+
+
+## Infection prevalence in infection assays
+```{r, import dataset that will allow analysis of prevalence in infection assays}
+# The dataset we were working with above only has infected animals or controls. Let's upload the dataset that will also include animals that were exposed but did not become infected
+LA_full <- readr::read_csv(here("data/LA_full.csv")) 
+
+# since we want to look at infectivity, let's get rid of the control/unexposed animals
+LA_exposed <- LA_full %>%
+  subset(para_time_point != "none")
+
+# get rid of time 4 hosts, since we didn't have parasites from that time point
+LA_exposed <- LA_exposed %>%
+  subset(host_time_point != '4')
+
+# filter out ones that are missing spore counts
+LA_exposed <- LA_exposed %>%
+  drop_na(spores_tot)
+
+# Looking for clones that had very few animals in the experiment
+LA_exposed_samplesizes <- LA_exposed %>%
+  count(clone, para_time_point)
+
+LA_exposed_samplesizes$remove <- ifelse(LA_exposed_samplesizes$n < 3, 'y', 'n')
+
+# save
+write.csv(LA_exposed_samplesizes, here("tables", "LA_exposed_samplesizes.csv"), row.names = F)
+
+
+# Using spore yield to determine if it was infected; this is more sensitive than the 'infection' column, which was based on a quick visual assessment at death -- that inspection missed some that had very low spore densities
+LA_exposed$infected <- ifelse(LA_exposed$spores_tot == 0, 0, 1)
+
+
+# Calculate number infected and total sample sizes
+LA_exposed_prevalence <- LA_exposed %>%
+  group_by(clone, host_time_point, para_time_point) %>%
+  summarise(total = n(), inf = sum(infected)) 
+  
+# Calculate proportion infected per clone
+LA_exposed_prevalence$propinf <- LA_exposed_prevalence$inf/LA_exposed_prevalence$total
+
+LA_exposed_prevalence$host_time_point <- as.character(LA_exposed_prevalence$host_time_point)
+
+infprevplot <- ggplot(LA_exposed_prevalence, 
+                     aes(x=host_time_point, y=propinf, fill=para_time_point)) + 
+  geom_violin(position=position_dodge(1)) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
+  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
+  xlab("Host time point") +ylab("Proportion infected") +
+  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
+  theme_cowplot()
+
+infprevplot
+
+infprevplota <- LA_exposed_prevalence %>%
+  filter(host_time_point == para_time_point) %>%
+  ggplot(aes(x=host_time_point, y=propinf, fill=para_time_point)) + 
+  geom_violin(position=position_dodge(1), show.legend = FALSE) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
+  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
+  ylim(0,1.00) +
+  xlab("Host time point") +ylab("Proportion infected (contemporary parasites)") +
+  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
+  theme_cowplot()
+
+infprevplota
+
+infprevplotb <- LA_exposed_prevalence %>%
+  filter(host_time_point == 3) %>%
+  ggplot(aes(x=para_time_point, y=propinf, fill=para_time_point)) + 
+  geom_violin(position=position_dodge(1), show.legend = FALSE) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#C0C0C0", "#f3c483")) + 
+  scale_color_manual(values=c("#C0C0C0", "#f3c483")) +
+  ylim(0,1.00) +
+  xlab("Parasite time point") +ylab("Proportion infected (time 3 hosts)") +
+  theme_cowplot()
+
+infprevplotb
+
+infprevplot2 <- plot_grid(infprevplota, infprevplotb, labels = "auto", ncol = 2, align = "v")
+infprevplot2
+
+ggsave(here("figures", "infprevplot.jpg"), infprevplot2, units = "in", width = 8, height = 5, dpi = 300)
+```
+
+```{r, analyze infection prevalence data}
+LA_exposed_prevalence_sametime <- subset(LA_exposed_prevalence, host_time_point == para_time_point)
+
+prevmodel1<-glmer(cbind(inf, total-inf) ~ para_time_point + (1 | clone), family='binomial', data=LA_exposed_prevalence_sametime) 
+
+# Testing for overdispersion (using code from Ben Bolker via Michelle Fearon)
+overdisp_fun <- function(model) {
+  rdf <- df.residual(model)
+  rp <- residuals(model,type="pearson")
+  Pearson.chisq <- sum(rp^2)
+  prat <- Pearson.chisq/rdf
+  pval <- pchisq(Pearson.chisq, df=rdf, lower.tail=FALSE)
+  c(chisq=Pearson.chisq,ratio=prat,rdf=rdf,p=pval)
+}
+
+overdisp_fun(prevmodel1)
+
+summary(prevmodel1)
+
+LA_exposed_prevalence_sametime$para_time_point <- as.factor(LA_exposed_prevalence_sametime$para_time_point)
+
+# Testing for overall effect of parasite time point
+drop1(prevmodel1,test="Chisq")
+
+# Now comparing the two sets of spores that were used to infect time 3 hosts
+LA_exposed_prevalence_time3 <- subset(LA_exposed_prevalence, host_time_point == '3')
+
+prevmodel2<-glmer(cbind(inf, total-inf) ~ para_time_point + (1 | clone), family='binomial', data=LA_exposed_prevalence_time3) 
+
+overdisp_fun(prevmodel2)
+
+summary(prevmodel2)
+
+# Getting chi-square to be parallel to initial analysis
+drop1(prevmodel2,test="Chisq")
+```
+
+
+## Contemporary virulence
+Comparing hosts exposed to parasites from the same time point
+
+```{r, get dataset for contemporary exposures}
+
+LA_sametime <- LA_infected %>%
+  filter(para_time_point != "none") 
+
+LA_sametime$para_time_point <- as.factor(LA_sametime$para_time_point)
+LA_sametime$host_time_point <- as.factor(as.character(LA_sametime$host_time_point))
+
+LA_sametime$para_time_point <- droplevels(LA_sametime$para_time_point)
+
+LA_sametime <- subset(LA_sametime, host_time_point == para_time_point)
+```
+
+```{r, lifespan for hosts exposed to contemporary parasites}
+LA_sametime$paragrowth <- (LA_sametime$spores_tot)/(LA_sametime$lifespan)
+
+
+LA_sametime_summary <- LA_sametime %>%
+  group_by(clone, para_time_point) %>%
+  summarise(meanlifespan = mean(lifespan), meanclutches = mean(clutches), meanspores = mean(spores_tot), meanlogspores = mean(logspores), meanparagrowth = mean(paragrowth)) 
+
+
+contemplifespanplot <- ggplot(LA_sametime_summary, 
+                     aes(x=para_time_point, y=meanlifespan, fill=para_time_point)) + 
+  geom_violin(show.legend = FALSE) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0, seed = 1), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
+  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
+  xlab("Parasite time point") +ylab("Mean lifespan \n(days)") +
+  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
+  theme_cowplot()
+
+
+contemplifespanplot
+```
+
+
+```{r, analysis of contemporary lifespan}
+contemporarylifespan <-glmer(lifespan ~ host_time_point + (1 | clone), family = "poisson", data=LA_sametime) 
+
+overdisp_fun(contemporarylifespan)
+
+summary(contemporarylifespan)
+
+contemporarylifespan.nb <-glmer.nb(lifespan ~ host_time_point + (1 | clone), data=LA_sametime) 
+
+overdisp_fun(contemporarylifespan.nb)
+
+summary(contemporarylifespan.nb)
+drop1(contemporarylifespan.nb,test="Chisq")
+
+emmeans(contemporarylifespan.nb, specs = pairwise ~ host_time_point)
+
+```
+
+```{r, reproduction of hosts exposed to contemporary parasites}
+
+contempreproplot <- ggplot(LA_sametime_summary, 
+                     aes(x=para_time_point, y=meanclutches, fill=para_time_point)) + 
+  geom_violin(show.legend = FALSE) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0, seed = 1), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
+  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
+  xlab("Parasite time point") +ylab("Mean number of clutches") +
+  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
+  theme_cowplot()
+
+
+contempreproplot
+```
+
+```{r, analysis of contemporary reproduction}
+contemporaryclutches <-glmer(clutches ~ host_time_point + (1 | clone), family = "poisson", data=LA_sametime) 
+
+overdisp_fun(contemporaryclutches)
+
+summary(contemporaryclutches)
+
+contemporaryclutches.nb <-glmer.nb(clutches ~ host_time_point + (1 | clone), data=LA_sametime) 
+
+overdisp_fun(contemporaryclutches.nb)
+
+summary(contemporaryclutches.nb)
+drop1(contemporaryclutches.nb,test="Chisq")
+
+emmeans(contemporaryclutches.nb, specs = pairwise ~ host_time_point)
+
+```
+
+
+```{r, spores produced by hosts exposed to contemporary parasites}
+
+contempsporesplot <- ggplot(LA_sametime_summary, 
+                     aes(x=para_time_point, y=meanspores, fill=para_time_point)) + 
+  geom_violin(show.legend = FALSE) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0, seed = 1), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
+  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
+  xlab("Parasite time point") +ylab("Mean number of \nspores per infected host") +
+  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
+  scale_y_log10() +
+  theme_cowplot()
+
+
+contempsporesplot
+```
+
+```{r, analysis of contemporary spores}
+contemporarylogspores <- lmer(logspores ~ host_time_point + (1 | clone), data=LA_sametime) 
+
+overdisp_fun(contemporarylogspores)
+
+summary(contemporarylogspores)
+
+drop1(contemporarylogspores,test="Chisq")
+
+emmeans(contemporarylogspores, specs = pairwise ~ host_time_point)
+
+#R3 asked about the non-log-transformed data, so let's do that
+contemporaryspores <- lmer(spores_tot ~ host_time_point + (1 | clone), data=LA_sametime) 
+
+overdisp_fun(contemporaryspores)
+
+summary(contemporaryspores)
+
+drop1(contemporaryspores,test="Chisq")
+
+```
+
+
+```{r, parasite growth rate for hosts exposed to contemporary parasites}
+contempparagrowthplot <- ggplot(LA_sametime_summary, 
+                     aes(x=para_time_point, y=meanparagrowth, fill=para_time_point)) + 
+  geom_violin(show.legend = FALSE) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0, seed = 1), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#5445b1", "#749dae", "#f3c483")) + 
+  scale_color_manual(values=c("#5445b1", "#749dae", "#f3c483")) +
+  xlab("Parasite time point") +ylab("Parasite growth rate \n(spores per day)") +
+  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
+  theme_cowplot()
+
+
+contempparagrowthplot
+
+```
+
+
+```{r, analysis of contemporary growthrate}
+
+contemporaryparasitegrowth <- lmer(paragrowth ~ host_time_point + (1 | clone), data=LA_sametime) 
+
+overdisp_fun(contemporaryparasitegrowth)
+
+summary(contemporaryparasitegrowth)
+
+drop1(contemporaryparasitegrowth,test="Chisq")
+
+emmeans(contemporaryparasitegrowth, specs = pairwise ~ host_time_point)
+
+```
+
+
+
+
+## Parasite evolution comparison
+Comparing hosts from time 3 that were exposed to parasites from time 1 vs. time 3
+
+```{r, get dataset for parasite evolution comparison}
+LA_paraevol <- LA_infected %>%
+  filter(host_time_point == "3") %>%
+  filter(para_time_point != "none")
+
+LA_paraevol$paragrowth <- (LA_paraevol$spores_tot)/(LA_paraevol$lifespan)
+
+
+LA_paraevol_summary <- LA_paraevol %>%
+  group_by(clone, para_time_point) %>%
+  summarise(meanlifespan = mean(lifespan), meanclutches = mean(clutches), meanspores = mean(spores_tot), meanlogspores = mean(logspores), meanparagrowth = mean(paragrowth)) 
+```
+
+
+### Lifespan
+```{r, lifespan for hosts from time 3}
+lifespanparaevol <- ggplot(LA_paraevol_summary, 
+                     aes(x=para_time_point, y=meanlifespan, fill=para_time_point)) + 
+  geom_violin(show.legend = FALSE) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0, seed = 1), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#C0C0C0", "#f3c483")) + 
+  scale_color_manual(values=c("#C0C0C0", "#f3c483")) +
+  xlab("Parasite time point") +ylab("Mean lifespan \n(days)") +
+  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
+  theme_cowplot()
+
+
+lifespanparaevol
+
+```
+
+```{r, analysis of host lifespan for parasite evolution comparison}
+paraevollifespan <-glmer(lifespan ~ para_time_point + (1 | clone), family = "poisson", data=LA_paraevol) 
+
+overdisp_fun(paraevollifespan)
+
+summary(paraevollifespan)
+
+paraevollifespan.nb <-glmer.nb(lifespan ~ para_time_point + (1 | clone), data=LA_paraevol) 
+
+overdisp_fun(paraevollifespan.nb)
+
+summary(paraevollifespan.nb)
+```
+
+
+### Reproduction
+```{r, reproduction for hosts from time 3}
+reproparaevol <- ggplot(LA_paraevol_summary, 
+                     aes(x=para_time_point, y=meanclutches, fill=para_time_point)) + 
+  geom_violin(show.legend = FALSE) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0, seed = 1), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#C0C0C0", "#f3c483")) + 
+  scale_color_manual(values=c("#C0C0C0", "#f3c483")) +
+  xlab("Parasite time point") +ylab("Mean number of clutches") +
+  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
+  theme_cowplot()
+
+
+reproparaevol
+
+```
+
+```{r, analysis of host reproduction for parasite evolution comparison}
+paraevolclutches <-glmer(clutches ~ para_time_point + (1 | clone), family = "poisson", data=LA_paraevol) 
+
+overdisp_fun(paraevolclutches)
+
+summary(paraevolclutches)
+
+paraevolclutches.nb <-glmer.nb(clutches ~ para_time_point + (1 | clone), data=LA_paraevol) 
+
+overdisp_fun(paraevolclutches.nb)
+
+summary(paraevolclutches.nb)
+```
+
+
+### Spores
+```{r, spore yield for hosts from time 3}
+sporesparaevol <- ggplot(LA_paraevol_summary, 
+                     aes(x=para_time_point, y=meanspores, fill=para_time_point)) + 
+  geom_violin(show.legend = FALSE) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0, seed = 1), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#C0C0C0", "#f3c483")) + 
+  scale_color_manual(values=c("#C0C0C0", "#f3c483")) +
+  xlab("Parasite time point") +ylab("Mean number of \nspores per infected host") +
+  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
+  scale_y_log10() +
+  theme_cowplot()
+
+
+sporesparaevol
+
+```
+
+```{r, analysis of spore yield for parasite evolution comparison}
+paraevollogspores <- lmer(logspores ~ para_time_point + (1 | clone), data=LA_paraevol) 
+
+overdisp_fun(paraevollogspores)
+
+summary(paraevollogspores)
+
+drop1(paraevollogspores,test="Chisq")
+
+
+#R3 asked about the analysis if we don't log transform the data
+paraevolspores <- lmer(spores_tot ~ para_time_point + (1 | clone), data=LA_paraevol) 
+
+overdisp_fun(paraevolspores)
+
+summary(paraevolspores)
+
+drop1(paraevolspores,test="Chisq")
+```
+
+### Parasite growth rate
+```{r, parasite growth rate for hosts from time 3}
+paragrowthparaevol <- ggplot(LA_paraevol_summary, 
+                     aes(x=para_time_point, y=meanparagrowth, fill=para_time_point)) + 
+  geom_violin(show.legend = FALSE) + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0, seed = 1), alpha = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values=c("#C0C0C0", "#f3c483")) + 
+  scale_color_manual(values=c("#C0C0C0", "#f3c483")) +
+  xlab("Parasite time point") +ylab("Parasite growth rate \n(spores per day)") +
+  labs(color= "Parasite time point") + labs(fill="Parasite time point") +
+  theme_cowplot()
+
+
+paragrowthparaevol
+
+```
+
+```{r, analysis of parasite growth rate for parasite evolution comparison}
+paraevolparasitegrowth <- lmer(paragrowth ~ para_time_point + (1 | clone), data=LA_paraevol) 
+
+summary(paraevolparasitegrowth)
+
+drop1(paraevolparasitegrowth,test="Chisq")
+
+```
+
+### Combined figure 
+```{r, figure with 8 plots}
+eightpanelplot <- plot_grid(contemplifespanplot, lifespanparaevol, contempreproplot, reproparaevol, contempsporesplot, sporesparaevol, contempparagrowthplot, paragrowthparaevol, labels = "auto", ncol = 2, align = "v")
+eightpanelplot
+
+# now add the title
+title1 <- ggplot() +                      # Draw ggplot2 plot with text only
+  annotate("text",
+           x = 0,
+           y = 1,
+           size = 6,
+           label = "Contemporary hosts",
+#           hjust = 0.64,
+            hjust = 0.5,
+           fontface = "bold") + 
+  theme_void()
+
+title2 <- ggplot() +                      # Draw ggplot2 plot with text only
+  annotate("text",
+           x = 0,
+           y = 1,
+           size = 6,
+           label = "Time 3 hosts",
+           hjust = 0.5,
+           fontface = "bold") + 
+  theme_void()
+
+titles <- plot_grid(title1, title2, nrow = 1,   hjust = 0)
+
+titles
+
+eightpanelplot_withtitles <- plot_grid(
+  titles, eightpanelplot,
+  ncol = 1,
+  # rel_heights values control vertical title margins
+  rel_heights = c(0.05, 1)
+)
+
+eightpanelplot_withtitles
+
+
+ggsave(here("figures", "eightpanelplot_withtitles.jpg"), eightpanelplot_withtitles, units = "in", width = 8, height = 12, dpi = 300)
+```
+
+
+
+# Exposed but uninfected animals
+
+Reviewer 3 was asking about exposed but uninfected animals. Let's make a new dataframe to look at that.
+```{r, creating dataframe with exposed but uninfected animals}
+
+# get rid of time 4 hosts from the full dataset, since we didn't have parasites from that time point
+LA_full <- LA_full %>%
+  subset(host_time_point != '4')
+
+# filter out ones that are missing spore counts
+LA_full <- LA_full %>%
+  drop_na(spores_tot)
+
+# Looking for clones that had very few animals in the experiment
+LA_full_samplesizes <- LA_full %>%
+  count(clone, para_time_point)
+
+# save
+write.csv(LA_full_samplesizes, here("tables", "LA_full_samplesizes.csv"), row.names = F)
+
+
+# Using spore yield to determine if it was infected; this is more sensitive than the 'infection' column, which was based on a quick visual assessment at death -- that inspection missed some that had very low spore densities
+LA_full$infected <- ifelse(LA_full$spores_tot == 0, 0, 1)
+
+LA_full$exposureclass <- ifelse(LA_full$para_time_point == "none", 'control',
+                                ifelse(LA_full$spores_tot > 0, 'infected', 'exposed'))
+
+LA_full_summary <- LA_full %>%
+  group_by(exposureclass, host_time_point, clone, para_time_point) %>%
+  summarise(meanlifespan = mean(lifespan), meanclutches = mean(clutches)) 
+
+```
+
+
+```{r, plotting lifespan data for three exposure classes}
+
+
+lifespan_exposureclass <- ggplot(LA_full_summary, 
+                               aes(x=exposureclass, y=meanlifespan)) + 
+  geom_violin() + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, color = '#5c1a33', size = 2) + 
+  ylab("Mean lifespan \n(days)")  +
+  theme_cowplot() +
+  theme(axis.title.x = element_blank())
+
+
+lifespan_exposureclass
+
+```
+
+
+```{r, plotting fecundity data for three exposure classes}
+
+
+# making a plot comparing exposed vs. unexposed
+repro_exposureclass <- ggplot(LA_full_summary, 
+                               aes(x=exposureclass, y=meanclutches)) + 
+  geom_violin() + 
+  geom_jitter(shape=16, position=position_jitter(width=0.3, height=0), alpha = 0.5, color = '#5c1a33', size = 2) +
+  ylab("Mean number of clutches")  +
+  theme_cowplot() +
+  theme(axis.title.x = element_blank())
+
+repro_exposureclass
+```
+
+
+Let's arrange the lifespan & fecundity plots into a single figure:
+```{r, single plot of three exposure classes}
+exposureclassplot <- plot_grid(lifespan_exposureclass, repro_exposureclass, labels = "auto", ncol = 1, align = "v")
+exposureclassplot
+
+ggsave(here("figures", "exposureclassplot.jpg"), exposureclassplot, units = "in", width = 5, height = 8, dpi = 300)
+
+```
+
+
+```{r, analysis of host lifespan and reproduction for three exposure classes}
+
+lifespanmodel_3classes.nb <-glmer.nb(lifespan ~ exposureclass + (1 | clone), data=LA_full) 
+
+overdisp_fun(lifespanmodel_3classes.nb)
+
+summary(lifespanmodel_3classes.nb)
+
+emmeans(lifespanmodel_3classes.nb, specs = pairwise ~ exposureclass)
+
+
+repromodel_3classes.nb <-glmer.nb(clutches ~ exposureclass + (1 | clone), data=LA_full) 
+
+summary(repromodel_3classes.nb)
+
+emmeans(repromodel_3classes.nb, specs = pairwise ~ exposureclass)
+
+```
